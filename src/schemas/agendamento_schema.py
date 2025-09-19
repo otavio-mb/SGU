@@ -8,7 +8,7 @@ class AgendamentoSchema(ma.SQLAlchemyAutoSchema):
 
         fields = ("id", "dt_agendamento", "dt_atendimento", "User_idUser", "Servicos_idServicos", "Profissional_idProfissional")
 
-    dt_agendamento = fields.DateTime(required=True)
+    dt_agendamento = fields.DateTime(required=True, format='%Y-%m-%d %H:%M:%S')
     dt_atendimento = fields.DateTime(required=True)
     Uder_idUser = fields.Integer(required=True)
     Servicos_idServicos = fields.Integer(required=True)
