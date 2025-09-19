@@ -1,17 +1,17 @@
 # Service para gerenciamento de agendamentos
 # Contém toda a lógica de negócio relacionada aos agendamentos
 
-# bibliotecas
 from datetime import datetime, timedelta, time
 from typing import List, Dict
-from models.agendamento_model import AgendamentoModel
-from models.servicos_model import ServicoModel
-from models.profissional_model import ProfissionalModel
+from ..models.agendamento_model import AgendamentoModel
+from ..models.servicos_model import ServicoModel
+from ..models.profissional_model import ProfissionalModel
+from ..models.usuario_model import UsuarioModel
+from src import db
 
 
 class AgendamentoService:
-    
-    # Service responsável pela lógica de negócio dos agendamentos
+    """Service responsável pela lógica de negócio dos agendamentos"""
     
     # Horários de funcionamento e intervalo de almoço
     HORA_ABERTURA = 9  # abre às 9h
@@ -33,11 +33,10 @@ class AgendamentoService:
     def criar_agendamento(dt_atendimento: datetime, id_user: int, 
                          id_profissional: int, servicos_ids: List[int],
                          observacoes: str = None) -> Dict:
-        
-        # Cria agendamento(s) para os serviços solicitados em uma data e hora específicas.
+        """Cria agendamento(s) para os serviços solicitados"""
         
         try:
-            # Valida dados básicos (tipos e valores)
+            # Valida dados básicos
             if not AgendamentoService._validar_dados_basicos(
                 dt_atendimento, id_user, id_profissional, servicos_ids):
                 return {"erro": "Dados inválidos fornecidos"}
@@ -56,45 +55,41 @@ class AgendamentoService:
             valor_total = 0
             
             for servico_id in servicos_ids:
-                servico = ServicoModel.find_by_id(servico_id)
+                servico = ServicoModel.query.get(servico_id)
                 if not servico:
                     return {"erro": f"Serviço com ID {servico_id} não encontrado"}
                 
                 servicos.append(servico)
-                duracao_total += AgendamentoService.DURACAO_SERVICOS.get(
-                    servico.nome.lower(), 60)  # padrão 60 min se não achar
-                valor_total += float(servico.preco)
+                duracao_servico = servico.horario_duracao if servico.horario_duracao else 60
+                duracao_total += duracao_servico
+                valor_total += float(servico.valor)
             
-            # Verifica se o profissional está disponível no período total
+            # Verifica se o profissional está disponível
             dt_fim = dt_atendimento + timedelta(minutes=duracao_total)
             if not AgendamentoService._verificar_disponibilidade(
                 id_profissional, dt_atendimento, dt_fim):
                 return {"erro": "Horário não disponível para o profissional"}
             
-            # Cria um agendamento para cada serviço, sequencialmente
+            # Cria um agendamento para cada serviço
             agendamentos_criados = []
             dt_atual = dt_atendimento
             
             for i, servico in enumerate(servicos):
-                duracao_servico = AgendamentoService.DURACAO_SERVICOS.get(
-                    servico.nome.lower(), 60)
+                duracao_servico = servico.horario_duracao if servico.horario_duracao else 60
                 
-                agendamento = AgendamentoModel(
-                    dt_atendimento=dt_atual,
-                    id_user=id_user,
-                    id_profissional=id_profissional,
-                    id_servico=servico.id,
-                    observacoes=observacoes if i == 0 else None,  # só no primeiro serviço
-                    valor_total=float(servico.preco)
-                )
+                agendamento = AgendamentoModel()
+                agendamento.dt_atendimento = dt_atual
+                agendamento.id_user = id_user
+                agendamento.id_profissional = id_profissional
+                agendamento.id_servico = servico.id
+                agendamento.observacoes = observacoes if i == 0 else None
+                agendamento.valor_total = float(servico.valor)
                 
-                agendamento.save()
+                agendamento.salvar()
                 agendamentos_criados.append(agendamento)
                 
-                # Atualiza hora para próximo serviço
                 dt_atual += timedelta(minutes=duracao_servico)
             
-            # Retorna dados do agendamento criado
             return {
                 "sucesso": True,
                 "agendamentos": [ag.to_dict() for ag in agendamentos_criados],
@@ -107,39 +102,32 @@ class AgendamentoService:
     
     @staticmethod
     def cancelar_agendamento(agendamento_id: int, user_id: int) -> Dict:
-        
-        # Cancela um agendamento, verificando permissões e status.
+        """Cancela um agendamento"""
         
         try:
             agendamento = AgendamentoModel.find_by_id(agendamento_id)
             
-            # Verifica se agendamento existe
             if not agendamento:
                 return {"erro": "Agendamento não encontrado"}
             
-            # Verifica se o usuário é dono do agendamento
             if agendamento.id_user != user_id:
                 return {"erro": "Acesso negado: agendamento não pertence ao usuário"}
             
-            # Verifica se já foi cancelado ou finalizado
             if agendamento.status == 'cancelado':
                 return {"erro": "Agendamento já foi cancelado"}
             
             if agendamento.status == 'finalizado':
                 return {"erro": "Não é possível cancelar um agendamento finalizado"}
             
-            # Calcula taxa de cancelamento se aplicável
-            servico = ServicoModel.find_by_id(agendamento.id_servico)
+            # Calcula taxa de cancelamento
+            servico = ServicoModel.query.get(agendamento.id_servico)
             taxa = 0.0
             
             if not agendamento.pode_cancelar_gratuito():
-                taxa = agendamento.calcular_taxa_cancelamento(float(servico.preco))
+                taxa = agendamento.calcular_taxa_cancelamento(float(servico.valor))
             
-            # Atualiza status e taxa no agendamento
-            agendamento.update(
-                status='cancelado',
-                taxa_cancelamento=taxa
-            )
+            # Atualiza status
+            agendamento.atualizar(status='cancelado', taxa_cancelamento=taxa)
             
             return {
                 "sucesso": True,
@@ -153,36 +141,32 @@ class AgendamentoService:
     
     @staticmethod
     def listar_horarios_disponiveis(profissional_id: int, data: datetime.date) -> Dict:
-        
-        # Lista os horários disponíveis para um profissional em um determinado dia.
+        """Lista horários disponíveis para um profissional"""
         
         try:
-            # Verifica se profissional existe
-            if not ProfissionalModel.find_by_id(profissional_id):
+            profissional = ProfissionalModel.query.get(profissional_id)
+            if not profissional:
                 return {"erro": "Profissional não encontrado"}
             
-            # Busca agendamentos do profissional na data
             agendamentos = AgendamentoModel.find_by_profissional_data(profissional_id, data)
             
-            # Marca horários já ocupados em slots de 30 minutos
             horarios_disponiveis = []
             horarios_ocupados = set()
             
+            # Marca horários ocupados
             for agendamento in agendamentos:
-                servico = ServicoModel.find_by_id(agendamento.id_servico)
-                duracao = AgendamentoService.DURACAO_SERVICOS.get(
-                    servico.nome.lower(), 60)
+                servico = ServicoModel.query.get(agendamento.id_servico)
+                duracao = servico.horario_duracao if servico.horario_duracao else 60
                 
                 inicio = agendamento.dt_atendimento
                 fim = inicio + timedelta(minutes=duracao)
                 
-                # Marca todos os intervalos de 30 min como ocupados
                 slot_atual = inicio
                 while slot_atual < fim:
                     horarios_ocupados.add(slot_atual.strftime("%H:%M"))
                     slot_atual += timedelta(minutes=30)
             
-            # Gera horários dentro do horário comercial, pulando almoço
+            # Gera horários disponíveis
             data_completa = datetime.combine(data, time(AgendamentoService.HORA_ABERTURA))
             
             while data_completa.hour < AgendamentoService.HORA_FECHAMENTO:
@@ -194,7 +178,6 @@ class AgendamentoService:
                 
                 horario_str = data_completa.strftime("%H:%M")
                 
-                # Se não ocupado, adiciona como disponível
                 if horario_str not in horarios_ocupados:
                     horarios_disponiveis.append({
                         "horario": horario_str,
@@ -217,44 +200,39 @@ class AgendamentoService:
                                    status: str = None,
                                    data_inicio: datetime = None,
                                    data_fim: datetime = None) -> Dict:
-        
-        # Lista agendamentos de um usuário, com filtros opcionais.
+        """Lista agendamentos de um usuário"""
         
         try:
             agendamentos = AgendamentoModel.find_by_user(user_id)
             
-            # Filtra por status, se informado
             if status:
                 agendamentos = [ag for ag in agendamentos if ag.status == status]
             
-            # Filtra por data inicial, se informado
             if data_inicio:
                 agendamentos = [ag for ag in agendamentos 
                                if ag.dt_atendimento >= data_inicio]
             
-            # Filtra por data final, se informado
             if data_fim:
                 agendamentos = [ag for ag in agendamentos 
                                if ag.dt_atendimento <= data_fim]
             
-            # Enriquecer dados com informações do serviço e profissional
             agendamentos_detalhados = []
             for agendamento in agendamentos:
                 ag_dict = agendamento.to_dict()
                 
-                servico = ServicoModel.find_by_id(agendamento.id_servico)
-                ag_dict['servico'] = {
-                    'nome': servico.nome,
-                    'preco': float(servico.preco),
-                    'duracao': AgendamentoService.DURACAO_SERVICOS.get(
-                        servico.nome.lower(), 60)
-                }
+                servico = ServicoModel.query.get(agendamento.id_servico)
+                if servico:
+                    ag_dict['servico'] = {
+                        'descricao': servico.descricao,
+                        'valor': float(servico.valor),
+                        'duracao': servico.horario_duracao
+                    }
                 
-                profissional = ProfissionalModel.find_by_id(agendamento.id_profissional)
-                ag_dict['profissional'] = {
-                    'nome': profissional.nome,
-                    'especialidade': profissional.especialidade
-                }
+                profissional = ProfissionalModel.query.get(agendamento.id_profissional)
+                if profissional:
+                    ag_dict['profissional'] = {
+                        'nome': profissional.nome
+                    }
                 
                 agendamentos_detalhados.append(ag_dict)
             
@@ -269,8 +247,7 @@ class AgendamentoService:
     @staticmethod
     def _validar_dados_basicos(dt_atendimento: datetime, id_user: int,
                               id_profissional: int, servicos_ids: List[int]) -> bool:
-        
-        # Verifica se os dados básicos estão corretos (tipos e presença).
+        """Valida dados básicos"""
         
         if not isinstance(dt_atendimento, datetime):
             return False
@@ -288,8 +265,7 @@ class AgendamentoService:
     
     @staticmethod
     def _verificar_horario_funcionamento(dt_atendimento: datetime) -> bool:
-        
-        # Verifica se o horário está dentro do expediente e não no almoço.
+        """Verifica horário de funcionamento"""
         
         hora = dt_atendimento.hour
         
@@ -305,8 +281,7 @@ class AgendamentoService:
     @staticmethod
     def _verificar_disponibilidade(profissional_id: int, dt_inicio: datetime,
                                   dt_fim: datetime) -> bool:
-        
-        # Checa se o profissional está disponível no intervalo pedido.
+        """Verifica disponibilidade do profissional"""
         
         agendamentos_conflito = AgendamentoModel.query.filter(
             AgendamentoModel.id_profissional == profissional_id,
@@ -315,12 +290,10 @@ class AgendamentoService:
         ).all()
         
         for agendamento in agendamentos_conflito:
-            servico = ServicoModel.find_by_id(agendamento.id_servico)
-            duracao = AgendamentoService.DURACAO_SERVICOS.get(
-                servico.nome.lower(), 60)
+            servico = ServicoModel.query.get(agendamento.id_servico)
+            duracao = servico.horario_duracao if servico.horario_duracao else 60
             ag_fim = agendamento.dt_atendimento + timedelta(minutes=duracao)
             
-            # Se horários se sobrepõem, retorna indisponível
             if not (dt_fim <= agendamento.dt_atendimento or dt_inicio >= ag_fim):
                 return False
         
